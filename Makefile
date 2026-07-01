@@ -18,6 +18,10 @@ SRC      = set-clock.c
 # Detect the platform.
 ifeq ($(OS),Windows_NT)
     PLATFORM = Windows
+    # MinGW ships "gcc", not "cc"; use it unless the user set CC explicitly.
+    ifeq ($(origin CC),default)
+        CC = gcc
+    endif
 else
     PLATFORM = $(shell uname -s)
 endif
