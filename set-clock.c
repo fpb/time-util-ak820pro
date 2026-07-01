@@ -1,5 +1,6 @@
 // cc set-clock.c -o set-clock $(pkg-config --cflags --libs hidapi)
 // brew install hidapi pkg-config
+#define _XOPEN_SOURCE 700   // expose strptime / localtime_r on glibc
 #include <stdio.h>
 #include <string.h>
 #include <time.h>
