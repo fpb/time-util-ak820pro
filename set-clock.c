@@ -1,6 +1,5 @@
 // cc set-clock.c -o set-clock $(pkg-config --cflags --libs hidapi)
 // brew install hidapi pkg-config
-#define _XOPEN_SOURCE 700   // expose strptime / localtime_r on glibc
 #include <stdio.h>
 #include <string.h>
 #include <time.h>
@@ -30,14 +29,22 @@ int main(int argc, char **argv) {
     if (!path[0]) { fprintf(stderr, "Raw HID interface (0xFF60) not found — flashed with raw enabled?\n"); return 1; }
 
     // Time: now, or argv[1] = "YYYY-MM-DDTHH:MM:SS".
+    // strptime/localtime_r are POSIX-only; parse with sscanf and normalize with
+    // mktime so this stays portable (glibc, macOS, MinGW) and sets tm_wday.
     struct tm tmv;
+    time_t t = time(NULL);
+    tmv = *localtime(&t);
     if (argc > 1) {
-        memset(&tmv, 0, sizeof tmv);
-        if (!strptime(argv[1], "%Y-%m-%dT%H:%M:%S", &tmv)) {
+        int Y, M, D, h, m, s;
+        if (sscanf(argv[1], "%d-%d-%dT%d:%d:%d", &Y, &M, &D, &h, &m, &s) != 6) {
             fprintf(stderr, "bad time, use YYYY-MM-DDTHH:MM:SS\n"); return 1;
         }
-    } else {
-        time_t t = time(NULL); localtime_r(&t, &tmv);
+        tmv.tm_year = Y - 1900; tmv.tm_mon = M - 1; tmv.tm_mday = D;
+        tmv.tm_hour = h; tmv.tm_min = m; tmv.tm_sec = s;
+        tmv.tm_isdst = -1;
+        if (mktime(&tmv) == (time_t)-1) {
+            fprintf(stderr, "invalid date/time\n"); return 1;
+        }
     }
 
     // 33 bytes: [0]=report id (0), [1]=cmd 0x01, then payload.
