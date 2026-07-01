@@ -22,10 +22,12 @@ else
     PLATFORM = $(shell uname -s)
 endif
 
-# hidapi flags. On macOS/Windows the package is "hidapi"; on Linux the
-# libusb-backed variant is "hidapi-libusb" (fall back to "hidapi").
+# hidapi flags. On macOS/Windows the package is "hidapi". On Linux prefer the
+# hidraw backend ("hidapi-hidraw"): unlike the libusb backend it reports HID
+# usage_page/usage for devices whose interfaces are claimed by the kernel HID
+# driver (e.g. keyboards), which this program needs to find the raw interface.
 ifeq ($(PLATFORM),Linux)
-    HID_PKG := $(shell pkg-config --exists hidapi-libusb && echo hidapi-libusb || echo hidapi)
+    HID_PKG := $(shell pkg-config --exists hidapi-hidraw && echo hidapi-hidraw || echo hidapi)
 else
     HID_PKG := hidapi
 endif
