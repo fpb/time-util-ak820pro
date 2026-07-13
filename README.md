@@ -36,24 +36,19 @@ make clean
 ```sh
 ./set-clock                       # set the clock to the current local time
 ./set-clock 2026-07-01T14:30:00   # set a specific time (YYYY-MM-DDTHH:MM:SS)
-./set-clock --legacy              # talk to the default (non-VIA) firmware
 ./set-clock --list                # list all HID interfaces of the keyboard
 ```
 
 On success it prints `reply: OK`.
 
-### Firmware protocol (`--legacy`)
+### Firmware protocol
 
-The `via` keymap enables VIA, which takes over the raw-HID endpoint, so the
-clock-set command rides VIA's *custom-value* channel
-(`id_custom_set_value`, channel `0x10`, value `0x01`). This is the **default**
-mode of the tool.
-
-The `default` keymap does not enable VIA and keeps the original bespoke raw-HID
-command (`0x01` + payload). Use `--legacy` when talking to that firmware.
-
-If a `set-clock` run reports `error` or `no reply`, try the other mode — the two
-protocols are mutually exclusive per firmware build.
+Both firmware builds — the `default` keymap and the VIA-enabled `via` keymap —
+accept the **same** packet: VIA's *custom-value* framing
+(`id_custom_set_value` = `0x07`, channel `0x10`, value `0x01`, then the 7-byte
+`year-2000, month, day, weekday, hour, min, sec` payload). The reply echoes the
+buffer with `data[0]` == `0x07` when handled, so the tool needs no per-firmware
+mode.
 
 ## Linux permissions
 

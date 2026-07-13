@@ -10,38 +10,32 @@
 #define RAW_USAGE_PAGE 0xFF60
 #define RAW_USAGE      0x61
 
-// VIA firmware (the `via` keymap) owns the raw-HID endpoint, so the clock-set
-// command rides VIA's custom-value channel instead of a bespoke command:
-//   [id_custom_set_value, RTC_CHANNEL, RTC_SET_TIME, yy, mm, dd, wday, hh, mi, ss]
-// VIA echoes the buffer back with data[0] == id_custom_set_value when handled, or
-// id_unhandled (0xFF) if the channel/value was rejected.
+// Both firmwares (default and VIA keymaps) accept the same packet -- VIA's
+// custom-value layout:
+//   [ID_CUSTOM_SET_VALUE, RTC_CHANNEL, RTC_SET_TIME, yy, mm, dd, wday, hh, mi, ss]
+// The reply echoes the buffer with data[0] == ID_CUSTOM_SET_VALUE when handled, or
+// ID_UNHANDLED (0xFF) if the channel/value was rejected.
 #define ID_CUSTOM_SET_VALUE 0x07
 #define ID_UNHANDLED        0xFF
 #define RTC_CHANNEL         0x10
 #define RTC_SET_TIME        0x01
 
-// The default (non-VIA) keymap keeps the original bespoke command:
-//   [0x01, yy, mm, dd, wday, hh, mi, ss]; reply byte [1] is a status code.
-#define LEGACY_CMD_SET_TIME 0x01
-
 static void usage(const char *argv0) {
     fprintf(stderr,
-        "usage: %s [--legacy] [--list] [YYYY-MM-DDTHH:MM:SS]\n"
+        "usage: %s [--list] [YYYY-MM-DDTHH:MM:SS]\n"
         "  (no time)  set the clock to the host's current local time\n"
-        "  --legacy   talk to the default (non-VIA) firmware protocol\n"
         "  --list     list HID interfaces and exit\n",
         argv0);
 }
 
 int main(int argc, char **argv) {
-    int legacy = 0, list = 0;
+    int list = 0;
     const char *timearg = NULL;
     for (int i = 1; i < argc; i++) {
-        if      (strcmp(argv[i], "--legacy") == 0) legacy = 1;
-        else if (strcmp(argv[i], "--list")   == 0) list = 1;
-        else if (strcmp(argv[i], "--help")   == 0) { usage(argv[0]); return 0; }
-        else if (argv[i][0] == '-')                { usage(argv[0]); return 1; }
-        else                                       timearg = argv[i];
+        if      (strcmp(argv[i], "--list") == 0) list = 1;
+        else if (strcmp(argv[i], "--help") == 0) { usage(argv[0]); return 0; }
+        else if (argv[i][0] == '-')              { usage(argv[0]); return 1; }
+        else                                     timearg = argv[i];
     }
 
     if (hid_init()) { fprintf(stderr, "hid_init failed\n"); return 1; }
@@ -90,17 +84,11 @@ int main(int argc, char **argv) {
 
     // buf[0] is the HID report id (0, stripped on the wire); payload starts at [1].
     unsigned char buf[33] = {0};
-    if (legacy) {
-        buf[1] = LEGACY_CMD_SET_TIME;
-        buf[2] = yy; buf[3] = mm; buf[4] = dd; buf[5] = wd;
-        buf[6] = hh; buf[7] = mi; buf[8] = ss;
-    } else {
-        buf[1] = ID_CUSTOM_SET_VALUE;
-        buf[2] = RTC_CHANNEL;
-        buf[3] = RTC_SET_TIME;
-        buf[4] = yy; buf[5] = mm; buf[6] = dd; buf[7] = wd;
-        buf[8] = hh; buf[9] = mi; buf[10] = ss;
-    }
+    buf[1] = ID_CUSTOM_SET_VALUE;
+    buf[2] = RTC_CHANNEL;
+    buf[3] = RTC_SET_TIME;
+    buf[4] = yy; buf[5] = mm; buf[6] = dd; buf[7] = wd;
+    buf[8] = hh; buf[9] = mi; buf[10] = ss;
 
     hid_device *h = hid_open_path(path);
     if (!h) { fprintf(stderr, "open failed: %ls\n", hid_error(NULL)); return 1; }
@@ -113,9 +101,9 @@ int main(int argc, char **argv) {
     int n = hid_read_timeout(h, rep, sizeof rep, 1000);
     int ok = 0;
     if (n > 0) {
-        // Legacy: status byte in rep[1] (0x00 = OK). VIA: rep[0] echoes the
-        // command id when handled, or id_unhandled (0xFF) on rejection.
-        ok = legacy ? (rep[1] == 0x00) : (rep[0] == ID_CUSTOM_SET_VALUE);
+        // Reply echoes the command id when handled, or id_unhandled (0xFF) on
+        // rejection.
+        ok = (rep[0] == ID_CUSTOM_SET_VALUE);
         printf("reply: %s\n", ok ? "OK" : "error");
     } else {
         printf("no reply\n");
