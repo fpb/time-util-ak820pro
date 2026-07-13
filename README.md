@@ -36,10 +36,24 @@ make clean
 ```sh
 ./set-clock                       # set the clock to the current local time
 ./set-clock 2026-07-01T14:30:00   # set a specific time (YYYY-MM-DDTHH:MM:SS)
+./set-clock --legacy              # talk to the default (non-VIA) firmware
 ./set-clock --list                # list all HID interfaces of the keyboard
 ```
 
-On success it prints the keyboard's status reply, e.g. `status: 0x00 (OK)`.
+On success it prints `reply: OK`.
+
+### Firmware protocol (`--legacy`)
+
+The `via` keymap enables VIA, which takes over the raw-HID endpoint, so the
+clock-set command rides VIA's *custom-value* channel
+(`id_custom_set_value`, channel `0x10`, value `0x01`). This is the **default**
+mode of the tool.
+
+The `default` keymap does not enable VIA and keeps the original bespoke raw-HID
+command (`0x01` + payload). Use `--legacy` when talking to that firmware.
+
+If a `set-clock` run reports `error` or `no reply`, try the other mode — the two
+protocols are mutually exclusive per firmware build.
 
 ## Linux permissions
 
