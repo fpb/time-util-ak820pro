@@ -1,4 +1,4 @@
-# Cross-platform Makefile for set-clock (macOS, Linux, Windows)
+# Cross-platform Makefile for ak820ctl (macOS, Linux, Windows)
 #
 #   Prerequisites (hidapi + pkg-config):
 #     macOS:    brew install hidapi pkg-config
@@ -12,8 +12,8 @@
 
 CC      ?= cc
 CFLAGS  ?= -O2 -Wall
-TARGET   = set-clock
-SRC      = set-clock.c
+TARGET   = ak820ctl
+SRC      = ak820ctl.c
 
 # Detect the platform.
 ifeq ($(OS),Windows_NT)
