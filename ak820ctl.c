@@ -41,11 +41,13 @@
 #define FC_CRC32       0x06
 #define FC_STATUS      0x07
 #define FC_UNLOCK      0x08
+#define FC_CRC_NEXT    0x09
 
 #define FS_OK      0x00
 #define FS_BUSY    0x01
 #define FS_REFUSED 0x02
 #define FS_BADARG  0x03
+#define FS_MORE    0x04
 
 #define SECTOR 4096u
 #define PAGE    256u
@@ -61,6 +63,7 @@ static const char *fs_str(unsigned char s) {
         case FS_BUSY:    return "busy";
         case FS_REFUSED: return "refused (write floor / locked / animation running)";
         case FS_BADARG:  return "bad argument";
+        case FS_MORE:    return "in progress";
         default:         return "unknown status";
     }
 }
@@ -88,7 +91,9 @@ static int fcmd(unsigned char cmd, const unsigned char *args, int nargs, unsigne
         if (xfer(p, 3 + nargs, rep) < 0) return -1;
         if (rep[3] != FS_BUSY) break;
     }
-    if (rep[3] != FS_OK) { fprintf(stderr, "flash: %s\n", fs_str(rep[3])); return -1; }
+    if (rep[3] != FS_OK && rep[3] != FS_MORE) {
+        fprintf(stderr, "flash: %s\n", fs_str(rep[3])); return -1;
+    }
     return 0;
 }
 
@@ -147,6 +152,21 @@ static int erase_sectors(unsigned long addr, unsigned n) {
     return 0;
 }
 
+// The firmware folds only ~1KB per call so the HID callback stays short (a
+// single-shot verify of 184KB dropped its matrix scan from ~1396Hz to ~300Hz).
+// It answers FS_MORE until the range is consumed, so pump it here.
+static int device_crc(unsigned long addr, unsigned long len, unsigned long *out) {
+    unsigned char rep[32];
+    unsigned char c[6] = {(unsigned char)(addr >> 16), (unsigned char)(addr >> 8), (unsigned char)addr,
+                          (unsigned char)(len >> 16), (unsigned char)(len >> 8), (unsigned char)len};
+    if (fcmd(FC_CRC32, c, 6, rep) < 0) return -1;
+    while (rep[3] == FS_MORE)
+        if (fcmd(FC_CRC_NEXT, NULL, 0, rep) < 0) return -1;
+    *out = ((unsigned long)rep[4] << 24) | ((unsigned long)rep[5] << 16) |
+           ((unsigned long)rep[6] << 8)  | rep[7];
+    return 0;
+}
+
 static unsigned long crc32_of(const unsigned char *p, size_t n) {
     unsigned long c = 0xFFFFFFFFul;
     for (size_t i = 0; i < n; i++) {
@@ -194,11 +214,8 @@ static int cmd_write(unsigned long addr, const char *file, int do_unlock) {
 
     // Verify on the device: CRC the range there and compare, rather than
     // reading megabytes back over 27-byte packets.
-    unsigned char c[6] = {(unsigned char)(addr >> 16), (unsigned char)(addr >> 8), (unsigned char)addr,
-                          (unsigned char)(sz >> 16), (unsigned char)(sz >> 8), (unsigned char)sz};
-    if (fcmd(FC_CRC32, c, 6, rep) < 0) { free(buf); return 1; }
-    unsigned long got  = ((unsigned long)rep[4] << 24) | ((unsigned long)rep[5] << 16) |
-                         ((unsigned long)rep[6] << 8)  | rep[7];
+    unsigned long got;
+    if (device_crc(addr, (unsigned long)sz, &got) < 0) { free(buf); return 1; }
     unsigned long want = crc32_of(buf, (size_t)sz);
     free(buf);
     if (do_unlock) unlock(0);
@@ -212,11 +229,9 @@ static int cmd_write(unsigned long addr, const char *file, int do_unlock) {
 }
 
 static int cmd_crc(unsigned long addr, unsigned long len) {
-    unsigned char rep[32];
-    unsigned char c[6] = {(unsigned char)(addr >> 16), (unsigned char)(addr >> 8), (unsigned char)addr,
-                          (unsigned char)(len >> 16), (unsigned char)(len >> 8), (unsigned char)len};
-    if (fcmd(FC_CRC32, c, 6, rep) < 0) return 1;
-    printf("crc32(0x%06lX, %lu) = 0x%02X%02X%02X%02X\n", addr, len, rep[4], rep[5], rep[6], rep[7]);
+    unsigned long c;
+    if (device_crc(addr, len, &c) < 0) return 1;
+    printf("crc32(0x%06lX, %lu) = 0x%08lX\n", addr, len, c);
     return 0;
 }
 

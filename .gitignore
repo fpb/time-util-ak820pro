@@ -1,3 +1,7 @@
 set-clock
 ak820ctl
+assets/flash_assets.h
+assets/*.bin
+assets/raw/
 *.o
+__pycache__/
