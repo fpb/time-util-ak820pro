@@ -1,46 +1,30 @@
 #!/usr/bin/env python3
 """
-AK820 Pro LCD asset converter (Stage C -- see docs/LCD_FLASH_LAYER.md).
+AK820 Pro LCD asset converter.
 
-Decodes the source PNGs into flat .raw pixel files plus a manifest describing each
-one (dimensions, depth/format, stride, size, palette). No third-party deps: PNG is
-decoded here with stdlib zlib only (Pillow/ImageMagick are not available).
+Decodes the source PNGs into flat RGB565 .raw pixel files plus a manifest, and
+(with --flash) packs them into a single flash_assets.bin image + a flash_assets.h
+id header for provisioning into the keyboard's external SPI flash with
+`ak820ctl flash write`. No third-party deps: PNG is decoded here with stdlib zlib
+only (Pillow/ImageMagick are not available).
 
-EVERYTHING is emitted as rgb565: 16 bits per pixel, big-endian (hi byte first), alpha
-composited over black. That is the order the CPU path wants: lcd_blit_ram feeds
-tx_pixels, which emits each uint16 hi byte first.
+Pixels are RGB565, alpha composited over black. raw/ stores them big-endian
+(hi byte first) -- the order the CPU/RAM draw path (lcd_blit_ram -> tx_pixels)
+wants. --flash byte-swaps to lo-byte-first, which is what the flash->LCD DMA needs:
+it streams flash bytes through a 16-bit SPI transfer that shifts each pair out
+MSB first, so on-flash data must already be lo-first to arrive correctly. The DMA
+only streams raw pixels -- it cannot expand 1bpp or blend fg/bg on the fly -- so the
+on-flash bytes must already be exactly what the panel consumes. Glyph colours are
+therefore baked; harmless here, as the dashboard is uniformly white on black.
 
-CAUTION -- byte order depends on which path draws the asset, and this file only emits
-the RAM/CPU order:
-  RAM   -> CPU  (lcd_blit_ram):   hi byte first  <- what we emit here
-  flash -> DMA  (lcd_blit_flash): LO byte first  <- external flash needs the swap
-The DMA runs the SPI in 16-bit mode (CTRL0.DL=0xF), packing a byte pair into one word
-and shifting it out MSB first, so flash bytes must be stored lo-first to arrive correctly.
-Verified on hardware: the stock usb_dongle asset (flash 0x0D8310, stored lo-first) renders
-identically via DMA and via this path once byte-swapped.
-
-So moving an asset into flash for Stage D is NOT a pure relocation -- the bytes must be
-swapped on the way in. (The DMA can only stream raw pixels: it cannot expand 1bpp or blend
-fg/bg on the fly, so the on-flash bytes must already be what the panel consumes.)
-
-Consequence for fonts: glyph colours are BAKED. Harmless here -- the dashboard is
-uniformly COL_FG 0xFFFF on COL_BG 0x0000, which is exactly what the source PNGs are.
-
-Font atlases are self-describing: a magenta (255,0,255) marker sits at each glyph cell's
-top-left corner, so marker spacing IS the advance and marker count IS the glyph count.
-The markers are metadata and resolve to background in the output.
-
---embed additionally generates lcd_assets.c/.h for the INTERIM firmware-embedded stage.
-The full 95-glyph atlases are 97KB + 44KB, far past what fits alongside a ~92KB firmware
-in 256KB of flash, so fonts are SUBSET there to the glyphs the dashboard actually draws
-(EMBED_CHARSET). Images are embedded whole. The full atlases stay in raw/ untouched for
-the eventual flash write -- subsetting is purely an embed-time concern, so when the assets
-move to flash this step simply goes away.
+Font atlases are self-describing: a magenta (255,0,255) marker sits at each glyph
+cell's top-left corner, so marker spacing IS the advance and marker count IS the
+glyph count. The markers are metadata and resolve to background in the output.
 
 Usage:
     python3 mkraw.py            # inspect only: report what each PNG contains
     python3 mkraw.py --write    # also emit raw/<name>.raw + raw/manifest.json
-    python3 mkraw.py --embed    # also generate lcd_assets.c/.h (implies --write)
+    python3 mkraw.py --flash    # also pack flash_assets.bin + .h (implies --write)
 """
 
 import json
@@ -54,11 +38,6 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 OUTDIR = os.path.join(HERE, "raw")
 
 CHANNELS = {0: 1, 2: 3, 3: 1, 4: 2, 6: 4}  # PNG colour type -> samples per pixel
-
-# Glyphs the dashboard actually draws: HH:MM(:SS) clock, DD/MM date, NN% battery and
-# the channel digit. Keep this tight -- every extra character costs cell_w*cell_h*2
-# bytes per font (450B in the 30px face, 230B in the 20px one).
-EMBED_CHARSET = "0123456789:/%"
 
 
 # --------------------------------------------------------------------------- PNG
@@ -200,37 +179,7 @@ def slice_glyph(words, img_w, x0, cell_w, cell_h):
     return out
 
 
-def c_array(words, per_line=12):
-    """Format uint16 values as C initialiser lines."""
-    lines = []
-    for i in range(0, len(words), per_line):
-        lines.append("    " + " ".join("0x%04X," % w for w in words[i:i + per_line]))
-    return "\n".join(lines)
-
-
-def luma(c):
-    return (c[0] * 299 + c[1] * 587 + c[2] * 114) // 1000
-
-
 MARKER = (255, 0, 255)   # magenta: cell-origin markers in the font atlases
-
-
-def to_mono1(w, h, px):
-    """Pack to 1bpp, MSB-first, byte-aligned rows. Bit 1 = ink (white).
-
-    MARKER pixels are metadata (they mark each glyph cell's top-left corner) and are
-    packed as background, not ink. Fonts never carry glyph ink in that corner.
-    """
-    stride = (w + 7) // 8
-    out = bytearray(stride * h)
-    for y in range(h):
-        for x in range(w):
-            p = px[y * w + x]
-            if p[:3] == MARKER:
-                continue
-            if p[3] >= 128 and luma(p) >= 128:    # transparent is never ink
-                out[y * stride + (x >> 3)] |= 0x80 >> (x & 7)
-    return bytes(out), stride
 
 
 def font_metrics(w, h, px):
@@ -267,71 +216,7 @@ def to_rgb565(w, h, px):
     return bytes(out), w * 2
 
 
-# ------------------------------------------------------------------------- embed
-HDR = """// AUTO-GENERATED by res/mkraw.py --embed -- DO NOT EDIT.
-// Source PNGs live in res/; regenerate with:  python3 res/mkraw.py --embed
-//
-// All pixel data is RGB565 in panel order. Fonts are monospace tile atlases subset to
-// EMBED_CHARSET, stored as contiguous cell-sized glyphs in charset order, with their
-// colours baked (COL_FG on COL_BG). See docs/LCD_FLASH_LAYER.md.
-"""
-
-
-def emit_embed(entries, raw_dir, out_c, out_h):
-    images, fonts, chunks = [], [], []
-    for e in entries:
-        ident = c_ident(e["name"])
-        words = rgb565_words(open(os.path.join(raw_dir, os.path.basename(e["raw"])), "rb").read())
-        if "font" in e:
-            cw, ch = e["font"]["cell_w"], e["font"]["cell_h"]
-            first = e["font"]["first_char"]
-            glyphs = []
-            for c in EMBED_CHARSET:
-                idx = ord(c) - first
-                if not (0 <= idx < e["font"]["count"]):
-                    raise ValueError("%r not in %s" % (c, e["name"]))
-                glyphs.extend(slice_glyph(words, e["width"], idx * cw, cw, ch))
-            chunks.append("static const uint16_t px_font_%s[%d] = {\n%s\n};\n"
-                          % (ident, len(glyphs), c_array(glyphs)))
-            chunks.append('const lcd_font_t font_%s = { %d, %d, "%s", px_font_%s };\n'
-                          % (ident, cw, ch, EMBED_CHARSET, ident))
-            fonts.append((ident, len(glyphs) * 2, len(EMBED_CHARSET), cw, ch))
-        else:
-            chunks.append("static const uint16_t px_%s[%d] = {\n%s\n};\n"
-                          % (ident, len(words), c_array(words)))
-            chunks.append("const lcd_image_t img_%s = { %d, %d, px_%s };\n"
-                          % (ident, e["width"], e["height"], ident))
-            images.append((ident, len(words) * 2, e["width"], e["height"]))
-
-    with open(out_c, "w") as fh:
-        fh.write(HDR + '\n#include "lcd_assets.h"\n\n' + "\n".join(chunks))
-
-    with open(out_h, "w") as fh:
-        fh.write(HDR + "\n#pragma once\n#include <stdint.h>\n\n")
-        fh.write("// RGB565 image tile, blit with lcd_draw_image().\n"
-                 "typedef struct {\n    uint16_t        w, h;\n"
-                 "    const uint16_t *px;\n} lcd_image_t;\n\n")
-        fh.write("// Monospace RGB565 glyph atlas: `charset` maps a character to its tile\n"
-                 "// index, each tile cell_w*cell_h pixels. Colours are baked.\n"
-                 "typedef struct {\n    uint16_t        cell_w, cell_h;\n"
-                 "    const char     *charset;\n    const uint16_t *px;\n} lcd_font_t;\n\n")
-        for ident, nbytes, w, h in images:
-            fh.write("extern const lcd_image_t img_%s;   // %dx%d, %d bytes\n" % (ident, w, h, nbytes))
-        fh.write("\n")
-        for ident, nbytes, n, cw, ch in fonts:
-            fh.write("extern const lcd_font_t font_%s;   // %d glyphs @ %dx%d, %d bytes\n"
-                     % (ident, n, cw, ch, nbytes))
-
-    total = sum(b for _, b, *_ in images) + sum(b for _, b, *_ in fonts)
-    print("\nembedded %d images + %d fonts = %d bytes of pixel data" % (len(images), len(fonts), total))
-    for ident, nbytes, n, cw, ch in fonts:
-        print("   font_%-22s %2d glyphs @ %2dx%-2d %7d bytes" % (ident, n, cw, ch, nbytes))
-    for ident, nbytes, w, h in images:
-        print("   img_%-23s %3dx%-3d %13d bytes" % (ident, w, h, nbytes))
-
-
-# -------------------------------------------------------------------------- main
-# --------------------------------------------------------------------- flash
+# --------------------------------------------------------------------------- flash
 # --flash packs every asset into one image to be written at FLASH_ASSET_BASE:
 #
 #   +0x0000  index sector (4K): magic, version, count, then 16-byte entries
@@ -341,12 +226,8 @@ def emit_embed(entries, raw_dir, out_c, out_h):
 # Entry addresses are stored RELATIVE to the region base, so the whole blob can
 # be relocated by writing it somewhere else and telling the firmware where.
 #
-# The pixel bytes are BYTE-SWAPPED here. raw/ holds hi-byte-first, which is what
-# the CPU path (lcd_blit_ram -> tx_pixels) wants; the DMA path streams flash
-# bytes through a 16-bit SPI transfer that swaps each pair, so on-flash data
-# must be lo-byte-first to arrive correctly. Verified on hardware -- see
-# docs/LCD_FLASH_LAYER.md. This is exactly why moving assets to flash is a
-# reformat, not the "pure relocation" this file used to claim.
+# The pixel bytes are BYTE-SWAPPED here to lo-byte-first (raw/ holds hi-byte-first;
+# see the module docstring for why the DMA path needs lo-first).
 FLASH_MAGIC   = b"AKAS"
 FLASH_VERSION = 1
 FLASH_INDEX   = 0x1000     # index sector size; assets start here
@@ -406,7 +287,7 @@ def emit_flash(entries, raw_dir, out_bin, out_h):
     with open(out_bin, "wb") as fh:
         fh.write(blob)
     with open(out_h, "w") as fh:
-        fh.write("// AUTO-GENERATED by res/mkraw.py --flash -- DO NOT EDIT.\n"
+        fh.write("// AUTO-GENERATED by mkraw.py --flash -- DO NOT EDIT.\n"
                  "// Asset ids for the flash-resident set; the firmware reads the index\n"
                  "// sector at FLASH_ASSET_BASE and looks entries up by these ids.\n\n"
                  "#pragma once\n\n"
@@ -428,10 +309,10 @@ def emit_flash(entries, raw_dir, out_bin, out_h):
     print("upload with:  ak820ctl flash write 0x0CE0000 %s" % os.path.basename(out_bin))
 
 
+# -------------------------------------------------------------------------- main
 def main():
-    embed = "--embed" in sys.argv
     flash = "--flash" in sys.argv
-    write = embed or flash or "--write" in sys.argv
+    write = flash or "--write" in sys.argv
     pngs = sorted(f for f in os.listdir(HERE) if f.lower().endswith(".png"))
     if not pngs:
         print("no PNGs found in", HERE)
@@ -445,9 +326,9 @@ def main():
     for f in pngs:
         w, h, px = decode_png(os.path.join(HERE, f))
         colors = sorted({p for p in px})
-        # A magenta marker row means this is a font atlas -> mono1, drawn with runtime
-        # fg/bg. Everything else (icons, splash) keeps its real colours as rgb565:
-        # the icons are NOT all monochrome (bluetooth is blue, others carry a grey).
+        # A magenta marker row means this is a font atlas. Everything (icons, splash,
+        # fonts) is emitted as rgb565; the icons are NOT all monochrome (bluetooth is
+        # blue, others carry a grey), so they keep their real colours.
         metrics = font_metrics(w, h, px)
         data, stride, fmt, depth = *to_rgb565(w, h, px), "rgb565", 16
         note = ""
@@ -462,7 +343,7 @@ def main():
             "raw": "raw/%s.raw" % name,
             "width": w,
             "height": h,
-            "format": fmt,          # mono1 | rgb565
+            "format": fmt,          # rgb565
             "depth": depth,         # bits per pixel
             "stride": stride,       # bytes per row
             "bytes": len(data),
@@ -492,11 +373,6 @@ def main():
         emit_flash(manifest, OUTDIR,
                    os.path.join(HERE, "flash_assets.bin"),
                    os.path.join(HERE, "flash_assets.h"))
-
-    if embed:
-        emit_embed(manifest, OUTDIR,
-                   os.path.join(HERE, "lcd_assets.c"),
-                   os.path.join(HERE, "lcd_assets.h"))
     return 0
 
 
