@@ -23,12 +23,15 @@ The firmware repo has several branches; not every command applies to all of them
 
 | command | HID channel | supported branches |
 | --- | --- | --- |
-| `ak820ctl clock …` | `0x10` | `ak820pro-flashlcd-tiles`, `ak820pro-flashlcd`, `ak820pro-flashlcd-qp`, `ak820pro-flashlcd-qp-lld`, `ak820pro-full` |
-| `ak820ctl info` / `flash …` (assets, animations) | `0x11` | **`ak820pro-flashlcd-tiles` only** |
+| `ak820ctl clock …` | `0x10` | `ak820pro-lcd-flash` (both backends), `ak820pro-lcd-embedded` |
+| `ak820ctl info` / `flash …` (assets, animations) | `0x11` | **`ak820pro-lcd-flash` only** |
 
-Flash provisioning is a feature of the **`tiles`** branch (flash-resident assets,
-"Stage D"). The other LCD branches embed their art in the firmware image and have
-no flash-write channel; the `rgb*` branches have no LCD dashboard at all.
+Flash provisioning is a feature of the **`ak820pro-lcd-flash`** branch, which keeps
+the LCD art (and GIF animations) in the keyboard's external SPI flash — either
+dashboard backend (`-e DASHBOARD_BACKEND=custom|qp`) exposes the `0x11` channel.
+`ak820pro-lcd-embedded` embeds its art in the firmware image, so it has no
+flash-write channel (clock only). The `ak820pro-dev-*` branches (rgb / lvgl
+experiments) are not targets for this tool.
 
 ## Build
 
