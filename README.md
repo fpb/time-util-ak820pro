@@ -181,3 +181,35 @@ Then re-plug the keyboard.
   off first.
 - **`command not handled by firmware`** on a flash command → you're on a branch
   without the `0x11` channel; flash provisioning needs the `tiles` firmware.
+
+## Now playing (macOS)
+
+`nowplaying-macos.sh` watches **Music.app** and **Spotify** and pushes the current
+track to the LCD (branches with the now-playing view: `ak820pro-lcd-flash` /
+`-lcd-embedded`, either backend). It uses **AppleScript** rather than MediaRemote —
+MediaRemote catches browser media too, but Apple restricts it on recent macOS and
+third-party wrappers break between releases; AppleScript is app-specific but stable.
+
+It polls (default every 2 s), diffs, and calls `ak820ctl media` only when the track,
+state, or duration changes, on a seek (>2 s drift), or every `KEEPALIVE` seconds as a
+resync — the firmware self-advances the elapsed time between pushes, so there's no
+per-second traffic. Non-ASCII is folded to ASCII (the LCD font is ASCII-only).
+
+```sh
+make                      # build ak820ctl (the agent calls it)
+./nowplaying-macos.sh     # run in the foreground (Ctrl-C to stop)
+```
+
+Tunables (env): `INTERVAL` (poll seconds), `KEEPALIVE` (re-push seconds),
+`AK820CTL` (path to the binary).
+
+Run it at login as a LaunchAgent:
+
+```sh
+sed "s|@DIR@|$PWD|" com.fpb.ak820pro.nowplaying.plist.in \
+  > ~/Library/LaunchAgents/com.fpb.ak820pro.nowplaying.plist
+launchctl load ~/Library/LaunchAgents/com.fpb.ak820pro.nowplaying.plist   # unload to stop
+```
+
+Only Music and Spotify are covered (browser/other players won't show) — the trade-off
+for not depending on the restricted MediaRemote API.

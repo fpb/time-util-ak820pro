@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- LaunchAgent template for the AK820 Pro now-playing agent.
+     Replace @DIR@ with the absolute path to this repo, then install:
+       sed "s|@DIR@|$PWD|" com.fpb.ak820pro.nowplaying.plist.in \
+         > ~/Library/LaunchAgents/com.fpb.ak820pro.nowplaying.plist
+       launchctl load ~/Library/LaunchAgents/com.fpb.ak820pro.nowplaying.plist
+     Uninstall: launchctl unload ~/Library/LaunchAgents/com.fpb.ak820pro.nowplaying.plist -->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>            <string>com.fpb.ak820pro.nowplaying</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>@DIR@/nowplaying-macos.sh</string>
+    </array>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>AK820CTL</key>   <string>@DIR@/ak820ctl</string>
+        <key>INTERVAL</key>   <string>2</string>
+        <key>KEEPALIVE</key>  <string>15</string>
+    </dict>
+    <key>RunAtLoad</key>        <true/>
+    <key>KeepAlive</key>        <true/>
+    <key>StandardErrorPath</key><string>/tmp/ak820-nowplaying.log</string>
+    <key>StandardOutPath</key>  <string>/tmp/ak820-nowplaying.log</string>
+</dict>
+</plist>
