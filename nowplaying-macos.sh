@@ -67,8 +67,11 @@ while true; do
         [ -z "$line" ] && continue
         IFS='|' read -r st nm ar ps du <<<"$line"
         [ "$st" = "stopped" ] && continue
-        pnum=${ps%.*}; pnum=${pnum:-0}
-        dnum=${du%.*}; dnum=${dnum:-0}
+        [ "$nm" = "missing value" ] && nm=""
+        [ "$ar" = "missing value" ] && ar=""
+        # digits only -- fields can be "missing value" (streams/ads) or floats.
+        pnum=${ps%.*}; pnum=${pnum//[!0-9]/}; pnum=${pnum:-0}
+        dnum=${du%.*}; dnum=${dnum//[!0-9]/}; dnum=${dnum:-0}
         cand="$st|$nm|$ar|$pnum|$(( dnum / div ))"
         if [ "$st" = "playing" ]; then active="$cand"; break; fi
         [ -z "$active" ] && active="$cand"      # paused fallback if nothing playing
