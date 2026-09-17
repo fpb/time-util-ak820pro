@@ -43,6 +43,13 @@
 #define FC_UNLOCK      0x08
 #define FC_CRC_NEXT    0x09
 
+#define MEDIA_CHANNEL  0x12   // now-playing state (see firmware media/media.h)
+#define MC_CLEAR       0x00   // nothing playing -> firmware reverts to the clock
+#define MC_STATE       0x01   // [playing(1)][elapsed_ms u32 LE][duration_ms u32 LE]
+#define MC_TITLE       0x02   // [offset(1)][bytes...]
+#define MC_ARTIST      0x03   // [offset(1)][bytes...]
+#define MEDIA_STR_MAX  48
+
 #define FS_OK      0x00
 #define FS_BUSY    0x01
 #define FS_REFUSED 0x02
@@ -235,6 +242,60 @@ static int cmd_crc(unsigned long addr, unsigned long len) {
     return 0;
 }
 
+// --- now-playing (media) test channel ---------------------------------------
+// One frame: [SET_VALUE, MEDIA_CHANNEL, cmd, payload...]. The firmware echoes it.
+static int media_send(unsigned char cmd, const unsigned char *args, int nargs) {
+    unsigned char p[32] = {ID_CUSTOM_SET_VALUE, MEDIA_CHANNEL, cmd};
+    unsigned char rep[32];
+    if (nargs > 29) nargs = 29;                 // 3-byte header + 29 payload = 32
+    if (nargs) memcpy(&p[3], args, (size_t)nargs);
+    return xfer(p, 3 + nargs, rep);
+}
+
+// Send a title/artist string in in-order [offset][bytes] chunks (28 bytes each).
+static int send_media_str(unsigned char cmd, const char *s) {
+    int len = (int)strlen(s);
+    if (len > MEDIA_STR_MAX) len = MEDIA_STR_MAX;
+    int off = 0;
+    do {
+        unsigned char args[30];
+        int chunk = len - off;
+        if (chunk > 28) chunk = 28;
+        args[0] = (unsigned char)off;
+        if (chunk) memcpy(&args[1], s + off, (size_t)chunk);
+        if (media_send(cmd, args, 1 + chunk) < 0) return -1;
+        off += chunk;
+    } while (off < len);
+    return 0;
+}
+
+static int cmd_media(int argc, char **argv) {
+    if (argc >= 3 && !strcmp(argv[2], "clear")) return media_send(MC_CLEAR, NULL, 0);
+
+    const char *title = NULL, *artist = NULL;
+    long elapsed_s = 0, duration_s = 0;
+    int  playing = 1;
+    for (int i = 2; i < argc; i++) {
+        if      (!strcmp(argv[i], "--title")    && i + 1 < argc) title      = argv[++i];
+        else if (!strcmp(argv[i], "--artist")   && i + 1 < argc) artist     = argv[++i];
+        else if (!strcmp(argv[i], "--elapsed")  && i + 1 < argc) elapsed_s  = strtol(argv[++i], NULL, 10);
+        else if (!strcmp(argv[i], "--duration") && i + 1 < argc) duration_s = strtol(argv[++i], NULL, 10);
+        else if (!strcmp(argv[i], "--paused"))                   playing    = 0;
+        else if (!strcmp(argv[i], "--playing"))                  playing    = 1;
+    }
+    if (title  && send_media_str(MC_TITLE,  title)  < 0) return -1;
+    if (artist && send_media_str(MC_ARTIST, artist) < 0) return -1;
+
+    unsigned long el = (unsigned long)elapsed_s  * 1000u;
+    unsigned long du = (unsigned long)duration_s * 1000u;
+    unsigned char st[9] = {
+        (unsigned char)playing,
+        el & 0xFF, (el >> 8) & 0xFF, (el >> 16) & 0xFF, (el >> 24) & 0xFF,
+        du & 0xFF, (du >> 8) & 0xFF, (du >> 16) & 0xFF, (du >> 24) & 0xFF,
+    };
+    return media_send(MC_STATE, st, 9);
+}
+
 static void usage(const char *a0) {
     fprintf(stderr,
         "usage:\n"
@@ -243,11 +304,14 @@ static void usage(const char *a0) {
         "  %s flash write <addr> <file> [--unlock]\n"
         "  %s flash erase <addr> [sectors]  4K sectors (default 1)\n"
         "  %s flash crc   <addr> <len>\n"
+        "  %s media [--title T] [--artist A] [--elapsed S] [--duration S]\n"
+        "           [--playing|--paused]    push now-playing (S in seconds)\n"
+        "  %s media clear                   stop showing now-playing\n"
         "  %s list                          list HID interfaces\n"
         "\n"
         "addresses are hex (0x...) or decimal. --unlock permits writing the stock\n"
         "animation slots; the stock LCD assets are never writable.\n",
-        a0, a0, a0, a0, a0, a0);
+        a0, a0, a0, a0, a0, a0, a0, a0);
 }
 
 static int open_dev(int list) {
@@ -284,6 +348,8 @@ int main(int argc, char **argv) {
         rc = cmd_clock(argc > 2 ? argv[2] : NULL);
     } else if (!strcmp(argv[1], "info")) {
         rc = cmd_info();
+    } else if (!strcmp(argv[1], "media")) {
+        rc = cmd_media(argc, argv);
     } else if (!strcmp(argv[1], "flash") && argc >= 3) {
         int do_unlock = 0;
         for (int i = 3; i < argc; i++) if (!strcmp(argv[i], "--unlock")) do_unlock = 1;
