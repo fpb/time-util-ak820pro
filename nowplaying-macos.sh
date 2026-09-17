@@ -41,7 +41,7 @@ if application "$1" is running then
             on error
                 set ar to ""
             end try
-            return pstate & "|" & nm & "|" & ar & "|" & (player position) & "|" & (duration of current track)
+            return pstate & "|" & nm & "|" & ar & "|" & ((player position) as integer) & "|" & ((duration of current track) as integer)
         else
             return "stopped||||"
         end if
@@ -69,9 +69,10 @@ while true; do
         [ "$st" = "stopped" ] && continue
         [ "$nm" = "missing value" ] && nm=""
         [ "$ar" = "missing value" ] && ar=""
-        # digits only -- fields can be "missing value" (streams/ads) or floats.
-        pnum=${ps%.*}; pnum=${pnum//[!0-9]/}; pnum=${pnum:-0}
-        dnum=${du%.*}; dnum=${dnum//[!0-9]/}; dnum=${dnum:-0}
+        # digits only. AppleScript now coerces to integer, but be robust to a
+        # locale decimal separator ("." or ",") and "missing value" just in case.
+        pnum=${ps%%[.,]*}; pnum=${pnum//[!0-9]/}; pnum=${pnum:-0}
+        dnum=${du%%[.,]*}; dnum=${dnum//[!0-9]/}; dnum=${dnum:-0}
         cand="$st|$nm|$ar|$pnum|$(( dnum / div ))"
         if [ "$st" = "playing" ]; then active="$cand"; break; fi
         [ -z "$active" ] && active="$cand"      # paused fallback if nothing playing
@@ -81,6 +82,7 @@ while true; do
 
     if [ -z "$active" ]; then
         if [ "$last_sig" != "CLEAR" ]; then
+            [ -n "${DEBUG:-}" ] && echo "[$(date +%T)] CLEAR (no player)" >&2
             "$CTL" media clear >/dev/null 2>&1
             last_sig="CLEAR"
         fi
@@ -101,6 +103,11 @@ while true; do
 
     if [ "$sig" != "$last_sig" ] || [ "$drift" -gt 2 ] || [ $(( now - last_push )) -ge "$KEEPALIVE" ]; then
         pflag=--playing; [ "$st" = "paused" ] && pflag=--paused
+        if [ -n "${DEBUG:-}" ]; then
+            reason="sig"; [ "$sig" = "$last_sig" ] && reason="drift=$drift"
+            [ "$sig" = "$last_sig" ] && [ "$drift" -le 2 ] && reason="keepalive"
+            echo "[$(date +%T)] push $pflag elapsed=$pos_s dur=$dur_s ($reason) title=[$nm_a]" >&2
+        fi
         "$CTL" media --title "$nm_a" --artist "$ar_a" \
             --elapsed "${pos_s:-0}" --duration "${dur_s:-0}" "$pflag" >/dev/null 2>&1
         last_sig="$sig"; last_pos="$pos_s"; last_push="$now"
