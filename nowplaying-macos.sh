@@ -20,8 +20,42 @@ KEEPALIVE="${KEEPALIVE:-15}"
 
 [ -x "$CTL" ] || { echo "ak820ctl not found/executable at: $CTL" >&2; exit 1; }
 
-# Fold accents/UTF-8 to printable ASCII (the LCD font is ASCII only).
-to_ascii() { iconv -f UTF-8 -t ASCII//TRANSLIT 2>/dev/null | tr -d '\r'; }
+# Fold accents/UTF-8 to printable ASCII (the LCD font only has glyphs 0x20-0x7E).
+# macOS's BSD `iconv -t ASCII//TRANSLIT` is unusable here: it renders "Beyoncé"
+# as "Beyonc'e", "Motörhead" as "Mot?rhead", emits '?' and stray marks, and
+# corrupts adjacent letters. python3 (shipped with macOS) folds deterministically:
+# NFKD-decompose + drop combining marks (e->e, n~->n, o..->o), an explicit table
+# for letters that don't decompose (ss, o, ae, oe...) and common punctuation
+# (smart quotes/dashes/ellipsis), then keep only printable ASCII. iconv stays as a
+# fallback for the unlikely case python3 is missing.
+_ASCII_FOLD_PY=$(cat <<'PY'
+import sys, unicodedata
+MAP = {
+    "ß":"ss","ø":"o","Ø":"O","æ":"ae","Æ":"AE",
+    "œ":"oe","Œ":"OE","đ":"d","Đ":"D","ł":"l","Ł":"L",
+    "þ":"th","Þ":"Th","ð":"d","Ð":"D","ı":"i",
+    "“":"\"","”":"\"","„":"\"","‘":"'","’":"'","‚":"'",
+    "–":"-","—":"-","―":"-","−":"-","‐":"-","‑":"-",
+    "·":".","•":"*","…":"..."," ":" ","​":"","﻿":"",
+    "™":"(TM)","©":"(C)","®":"(R)","№":"No",
+}
+def fold(s):
+    out=[]
+    for ch in s:
+        if ch in MAP: out.append(MAP[ch]); continue
+        if ord(ch) < 0x80: out.append(ch); continue
+        d=unicodedata.normalize("NFKD", ch)
+        d="".join(c for c in d if not unicodedata.combining(c) and ord(c)<0x80)
+        out.append(d if d else "?")
+    return "".join(c for c in "".join(out) if 0x20 <= ord(c) <= 0x7e)
+sys.stdout.write(fold(sys.stdin.read()))
+PY
+)
+if command -v python3 >/dev/null 2>&1; then
+    to_ascii() { python3 -c "$_ASCII_FOLD_PY"; }
+else
+    to_ascii() { iconv -f UTF-8 -t ASCII//TRANSLIT 2>/dev/null | tr -d '\r'; }
+fi
 
 # Query one player without launching it. Echoes "state|title|artist|pos|dur"
 # (pos in s, dur in the app's native unit) or "" when the app isn't running.
