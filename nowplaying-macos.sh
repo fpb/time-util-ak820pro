@@ -91,30 +91,39 @@ CH  = max(1, int(os.environ.get("CHARS_PER_LINE", "12")))
 ELL = ">"
 def cap(w): return (w[:1].upper() + w[1:]) if w else w
 
-def greedy2(words, sep):
-    # Pack words onto 2 lines of <=CH; sep=True keeps a space between words.
-    lines = ["", ""]; li = 0
-    for w in words:
-        cur = lines[li]
-        need = len(cur) + (1 if (sep and cur) else 0) + len(w)
-        if need <= CH:
-            lines[li] = cur + ((" " if (sep and cur) else "") + w)
-        elif li == 0 and len(w) <= CH:
-            li = 1; lines[1] = w
+def fill2(words, sep):
+    # Greedily pack whole words onto 2 lines of <=CH (sep=True keeps a space
+    # between words). Returns (lines, over): over=True if not everything fit.
+    # Breaks only on word boundaries; a single word longer than a line is the
+    # one case that must hard-cut (marked as overflow).
+    lines = ["", ""]; li = 0; i = 0; over = False
+    while i < len(words):
+        w = words[i]; cur = lines[li]; gap = 1 if (sep and cur) else 0
+        if len(cur) + gap + len(w) <= CH:
+            lines[li] = cur + ((" " if gap else "") + w); i += 1
+        elif not cur:                     # unbreakable word longer than a line
+            lines[li] = w[:CH]; over = True; break
+        elif li == 0:
+            li = 1                         # spill to line 2
         else:
-            return None            # overflowed 2 lines
+            over = True; break             # out of lines, words remain
+    return lines, over
+
+def mark(lines):                           # append the truncation marker
+    idx = 1 if lines[1] else 0
+    L = lines[idx]
+    lines[idx] = (L[:CH-1] if len(L) > CH-1 else L) + ELL
     return lines
 
 def wrap2(s):
     words = s.split()
-    r = greedy2(words, True)                       # spaced, readable
-    if r is not None: return r[0], r[1]
-    r = greedy2([cap(w) for w in words], False)    # CamelCase-packed, word boundaries
-    if r is not None: return r[0], r[1]
-    packed = "".join(cap(w) for w in words)        # last resort: hard split + marker
-    l1, rest = packed[:CH], packed[CH:]
-    if len(rest) <= CH: return l1, rest
-    return l1, rest[:CH-1] + ELL
+    if not words: return "", ""
+    lines, over = fill2(words, True)                 # spaced + readable
+    if not over: return lines[0], lines[1]
+    clines, cover = fill2([cap(w) for w in words], False)  # CamelCase packs more
+    if not cover: return clines[0], clines[1]        # everything fits collapsed
+    lines = mark(lines)                              # else keep spaced, mark truncation
+    return lines[0], lines[1]
 
 def fit1(s):
     if len(s) <= CH: return s                      # as-is
