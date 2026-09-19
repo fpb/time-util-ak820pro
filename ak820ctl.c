@@ -46,8 +46,8 @@
 #define MEDIA_CHANNEL  0x12   // now-playing state (see firmware media/media.h)
 #define MC_CLEAR       0x00   // nothing playing -> firmware reverts to the clock
 #define MC_STATE       0x01   // [playing(1)][elapsed_ms u32 LE][duration_ms u32 LE]
-#define MC_TITLE       0x02   // [offset(1)][bytes...]
-#define MC_ARTIST      0x03   // [offset(1)][bytes...]
+#define MC_LINE        0x02   // [line(1)][offset(1)][bytes...]  -- one display line
+#define MEDIA_LINES    3      // display lines the firmware renders (host owns layout)
 #define MEDIA_STR_MAX  48
 
 #define FS_OK      0x00
@@ -252,18 +252,20 @@ static int media_send(unsigned char cmd, const unsigned char *args, int nargs) {
     return xfer(p, 3 + nargs, rep);
 }
 
-// Send a title/artist string in in-order [offset][bytes] chunks (28 bytes each).
-static int send_media_str(unsigned char cmd, const char *s) {
+// Send one display line's text in in-order [line][offset][bytes] chunks. The
+// firmware renders exactly what it is given; all wrapping/eliding is the host's.
+static int send_media_line(int line, const char *s) {
     int len = (int)strlen(s);
     if (len > MEDIA_STR_MAX) len = MEDIA_STR_MAX;
     int off = 0;
     do {
         unsigned char args[30];
         int chunk = len - off;
-        if (chunk > 28) chunk = 28;
-        args[0] = (unsigned char)off;
-        if (chunk) memcpy(&args[1], s + off, (size_t)chunk);
-        if (media_send(cmd, args, 1 + chunk) < 0) return -1;
+        if (chunk > 27) chunk = 27;             // 3-byte header + line + offset + 27 = 32
+        args[0] = (unsigned char)line;
+        args[1] = (unsigned char)off;
+        if (chunk) memcpy(&args[2], s + off, (size_t)chunk);
+        if (media_send(MC_LINE, args, 2 + chunk) < 0) return -1;
         off += chunk;
     } while (off < len);
     return 0;
@@ -272,19 +274,20 @@ static int send_media_str(unsigned char cmd, const char *s) {
 static int cmd_media(int argc, char **argv) {
     if (argc >= 3 && !strcmp(argv[2], "clear")) return media_send(MC_CLEAR, NULL, 0);
 
-    const char *title = NULL, *artist = NULL;
+    const char *line[MEDIA_LINES] = {0};
     long elapsed_s = 0, duration_s = 0;
     int  playing = 1;
     for (int i = 2; i < argc; i++) {
-        if      (!strcmp(argv[i], "--title")    && i + 1 < argc) title      = argv[++i];
-        else if (!strcmp(argv[i], "--artist")   && i + 1 < argc) artist     = argv[++i];
+        if      (!strcmp(argv[i], "--line0")    && i + 1 < argc) line[0]    = argv[++i];
+        else if (!strcmp(argv[i], "--line1")    && i + 1 < argc) line[1]    = argv[++i];
+        else if (!strcmp(argv[i], "--line2")    && i + 1 < argc) line[2]    = argv[++i];
         else if (!strcmp(argv[i], "--elapsed")  && i + 1 < argc) elapsed_s  = strtol(argv[++i], NULL, 10);
         else if (!strcmp(argv[i], "--duration") && i + 1 < argc) duration_s = strtol(argv[++i], NULL, 10);
         else if (!strcmp(argv[i], "--paused"))                   playing    = 0;
         else if (!strcmp(argv[i], "--playing"))                  playing    = 1;
     }
-    if (title  && send_media_str(MC_TITLE,  title)  < 0) return -1;
-    if (artist && send_media_str(MC_ARTIST, artist) < 0) return -1;
+    for (int i = 0; i < MEDIA_LINES; i++)
+        if (line[i] && send_media_line(i, line[i]) < 0) return -1;
 
     unsigned long el = (unsigned long)elapsed_s  * 1000u;
     unsigned long du = (unsigned long)duration_s * 1000u;
@@ -304,7 +307,7 @@ static void usage(const char *a0) {
         "  %s flash write <addr> <file> [--unlock]\n"
         "  %s flash erase <addr> [sectors]  4K sectors (default 1)\n"
         "  %s flash crc   <addr> <len>\n"
-        "  %s media [--title T] [--artist A] [--elapsed S] [--duration S]\n"
+        "  %s media [--line0 T] [--line1 T] [--line2 T] [--elapsed S] [--duration S]\n"
         "           [--playing|--paused]    push now-playing (S in seconds)\n"
         "  %s media clear                   stop showing now-playing\n"
         "  %s list                          list HID interfaces\n"

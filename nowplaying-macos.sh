@@ -17,6 +17,10 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 CTL="${AK820CTL:-$HERE/ak820ctl}"
 INTERVAL="${INTERVAL:-2}"
 KEEPALIVE="${KEEPALIVE:-15}"
+# Panel geometry. The firmware is a dumb 3-line renderer: this host owns ALL
+# layout, so the character budget per line lives here (change it without a
+# reflash). The AK820 Pro's now-playing font fits ~12 chars per 128px line.
+CHARS_PER_LINE="${CHARS_PER_LINE:-12}"; export CHARS_PER_LINE
 
 [ -x "$CTL" ] || { echo "ak820ctl not found/executable at: $CTL" >&2; exit 1; }
 
@@ -55,6 +59,84 @@ if command -v python3 >/dev/null 2>&1; then
     to_ascii() { python3 -c "$_ASCII_FOLD_PY"; }
 else
     to_ascii() { iconv -f UTF-8 -t ASCII//TRANSLIT 2>/dev/null | tr -d '\r'; }
+fi
+
+# Lay a title + artist out into the three display lines the firmware renders.
+# Args: <title> <artist>; prints exactly 3 lines (line0, line1, line2). Owns all
+# layout so the firmware stays dumb: ASCII-fold, then wrap the title over lines
+# 0-1 keeping spaces when it fits and CamelCase-packing only when it wouldn't,
+# and fit the artist on line 2; '>' marks truncation. CHARS_PER_LINE cells/line.
+_LAYOUT_PY=$(cat <<'PY'
+import sys, os, unicodedata
+MAP = {
+    "ß":"ss","ø":"o","Ø":"O","æ":"ae","Æ":"AE",
+    "œ":"oe","Œ":"OE","đ":"d","Đ":"D","ł":"l","Ł":"L",
+    "þ":"th","Þ":"Th","ð":"d","Ð":"D","ı":"i",
+    "“":'"',"”":'"',"„":'"',"‘":"'","’":"'","‚":"'",
+    "–":"-","—":"-","―":"-","−":"-","‐":"-","‑":"-",
+    "·":".","•":"*","…":"..."," ":" ","​":"","﻿":"",
+    "™":"(TM)","©":"(C)","®":"(R)","№":"No",
+}
+def fold(s):
+    out=[]
+    for ch in s:
+        if ch in MAP: out.append(MAP[ch]); continue
+        if ord(ch) < 0x80: out.append(ch); continue
+        d=unicodedata.normalize("NFKD", ch)
+        d="".join(c for c in d if not unicodedata.combining(c) and ord(c)<0x80)
+        out.append(d if d else "?")
+    return "".join(c for c in "".join(out) if 0x20 <= ord(c) <= 0x7e)
+
+CH  = max(1, int(os.environ.get("CHARS_PER_LINE", "12")))
+ELL = ">"
+def cap(w): return (w[:1].upper() + w[1:]) if w else w
+
+def greedy2(words, sep):
+    # Pack words onto 2 lines of <=CH; sep=True keeps a space between words.
+    lines = ["", ""]; li = 0
+    for w in words:
+        cur = lines[li]
+        need = len(cur) + (1 if (sep and cur) else 0) + len(w)
+        if need <= CH:
+            lines[li] = cur + ((" " if (sep and cur) else "") + w)
+        elif li == 0 and len(w) <= CH:
+            li = 1; lines[1] = w
+        else:
+            return None            # overflowed 2 lines
+    return lines
+
+def wrap2(s):
+    words = s.split()
+    r = greedy2(words, True)                       # spaced, readable
+    if r is not None: return r[0], r[1]
+    r = greedy2([cap(w) for w in words], False)    # CamelCase-packed, word boundaries
+    if r is not None: return r[0], r[1]
+    packed = "".join(cap(w) for w in words)        # last resort: hard split + marker
+    l1, rest = packed[:CH], packed[CH:]
+    if len(rest) <= CH: return l1, rest
+    return l1, rest[:CH-1] + ELL
+
+def fit1(s):
+    if len(s) <= CH: return s                      # as-is
+    cw = "".join(cap(w) for w in s.split())        # CamelCase-collapse
+    if len(cw) <= CH: return cw
+    return cw[:CH-1] + ELL
+
+title  = fold(sys.argv[1] if len(sys.argv) > 1 else "")
+artist = fold(sys.argv[2] if len(sys.argv) > 2 else "")
+l0, l1 = wrap2(title)
+sys.stdout.write(l0 + "\n" + l1 + "\n" + fit1(artist) + "\n")
+PY
+)
+if command -v python3 >/dev/null 2>&1; then
+    layout() { python3 -c "$_LAYOUT_PY" "$1" "$2"; }
+else
+    # Degraded (no python3): fold via iconv, hard-truncate, no wrap/CamelCase.
+    layout() {
+        printf '%s\n\n%s\n' \
+            "$(printf '%s' "$1" | to_ascii | cut -c1-"$CHARS_PER_LINE")" \
+            "$(printf '%s' "$2" | to_ascii | cut -c1-"$CHARS_PER_LINE")"
+    }
 fi
 
 # Query one player without launching it. Echoes "state|title|artist|pos|dur"
@@ -124,9 +206,11 @@ while true; do
     fi
 
     IFS='|' read -r st nm ar pos_s dur_s <<<"$active"
-    nm_a="$(printf '%s' "$nm" | to_ascii)"
-    ar_a="$(printf '%s' "$ar" | to_ascii)"
-    sig="$st|$nm_a|$ar_a|$dur_s"
+    # Lay out the three display lines here (host owns layout; firmware just draws).
+    # Portable 3-line read (no mapfile: macOS ships bash 3.2).
+    l0=""; l1=""; l2=""
+    { IFS= read -r l0; IFS= read -r l1; IFS= read -r l2; } < <(layout "$nm" "$ar")
+    sig="$st|$l0|$l1|$l2|$dur_s"
 
     # Progress drift vs. what the firmware would have self-advanced to.
     drift=999
@@ -140,9 +224,9 @@ while true; do
         if [ -n "${DEBUG:-}" ]; then
             reason="sig"; [ "$sig" = "$last_sig" ] && reason="drift=$drift"
             [ "$sig" = "$last_sig" ] && [ "$drift" -le 2 ] && reason="keepalive"
-            echo "[$(date +%T)] push $pflag elapsed=$pos_s dur=$dur_s ($reason) title=[$nm_a]" >&2
+            echo "[$(date +%T)] push $pflag elapsed=$pos_s dur=$dur_s ($reason) lines=[$l0|$l1|$l2]" >&2
         fi
-        "$CTL" media --title "$nm_a" --artist "$ar_a" \
+        "$CTL" media --line0 "$l0" --line1 "$l1" --line2 "$l2" \
             --elapsed "${pos_s:-0}" --duration "${dur_s:-0}" "$pflag" >/dev/null 2>&1
         last_sig="$sig"; last_pos="$pos_s"; last_push="$now"
     fi
